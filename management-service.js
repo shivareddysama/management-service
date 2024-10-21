@@ -1,57 +1,73 @@
 // Import required modules
-const amqp = require('amqplib/callback_api');  // AMQP client library for RabbitMQ
- 
-// URL for connecting to RabbitMQ
-const RABBITMQ_URL = 'amqp://localhost';
-const queue = 'order_queue';  // Queue name
- 
-// Connect to RabbitMQ
-amqp.connect(RABBITMQ_URL, (err, connection) => {
-  if (err) {
-    console.error('Error connecting to RabbitMQ:', err);
-    return;
-  }
- 
-  console.log('Connected to RabbitMQ successfully.');
- 
-  // Create a channel
-  connection.createChannel((err, channel) => {
+const express = require('express'); // Express framework for building the web application.
+const amqp = require('amqplib/callback_api'); // RabbitMQ client library using AMQP.
+const cors = require('cors'); // CORS middleware to handle cross-origin requests.
+require('dotenv').config(); // Load environment variables from .env file
+
+const app = express(); // Create an Express app instance.
+app.use(express.json()); // Middleware to parse JSON request bodies.
+
+// Enable CORS for all routes
+app.use(cors());
+
+// Environment variables for RabbitMQ connection string and server port
+const RABBITMQ_CONNECTION_STRING = process.env.RABBITMQ_CONNECTION_STRING || 'amqp://localhost';  // Fallback to localhost if not set
+const PORT = process.env.PORT || 3001;  // Fallback to port 3001 if not set
+
+// Function to retrieve messages from the queue
+const fetchOrdersFromQueue = (callback) => {
+  // Connect to RabbitMQ
+  amqp.connect(RABBITMQ_CONNECTION_STRING, (err, conn) => {
     if (err) {
-      console.error('Error creating channel:', err);
-      connection.close();
-      return;
+      // If error occurs during RabbitMQ connection, pass the error to the callback.
+      return callback(err, null);
     }
- 
-    // Assert the queue to ensure it exists and is durable
-    channel.assertQueue(queue, { durable: true });
- 
-    console.log(`Waiting for messages in queue: "${queue}"`);
- 
-    // Consume messages from the queue
-    channel.consume(queue, (msg) => {
-      if (msg !== null) {
-        const order = JSON.parse(msg.content.toString());
-        console.log('Received order:', order);
- 
-        // Acknowledge the message to remove it from the queue
-        channel.ack(msg);
-      } else {
-        console.warn('Received a null message');
+
+    // Create a channel for communication
+    conn.createChannel((err, channel) => {
+      if (err) {
+        return callback(err, null); // If error creating channel, pass error to callback.
       }
-    }, {
-      // Ensures the message is acknowledged only after processing
-      noAck: false
-    });
- 
-    // Graceful shutdown: Close the connection on SIGINT (Ctrl+C)
-    process.on('SIGINT', () => {
-      console.log('Closing RabbitMQ connection...');
-      channel.close(() => {
-        connection.close(() => {
-          console.log('Connection closed. Exiting...');
-          process.exit(0);
-        });
+
+      const queue = 'order_queue'; // Queue name to consume messages from
+
+      // Assert the queue (create if doesn't exist)
+      channel.assertQueue(queue, { durable: false });
+
+      // Fetch a message from the queue
+      channel.get(queue, { noAck: true }, (err, msg) => {
+        if (err) {
+          return callback(err, null); // Error handling during message consumption
+        }
+
+        if (msg) {
+          const order = JSON.parse(msg.content.toString()); // Parse message to JSON object
+          console.log("Fetched order from queue:", order);
+          return callback(null, order); // Pass the order to the callback
+        } else {
+          return callback(null, null); // No message in queue, return null
+        }
       });
     });
   });
+};
+
+// GET route to fetch an order from the queue
+app.get('/orders', (req, res) => {
+  fetchOrdersFromQueue((err, order) => {
+    if (err) {
+      return res.status(500).send('Error fetching order from queue');
+    }
+
+    if (order) {
+      res.json(order); // Return the fetched order as JSON response
+    } else {
+      res.status(404).send('No orders in queue');
+    }
+  });
+});
+
+// Start the management service server
+app.listen(PORT, () => {
+  console.log(`Management service is running on http://localhost:${PORT}`);
 });
